@@ -1,0 +1,4 @@
+PULL_ZONE_BASE=https://vz-e5c3a5b4-96b.b-cdn.net/
+
+
+f5dff234-32a3-4073-b0cf-e5f1fa6069dc

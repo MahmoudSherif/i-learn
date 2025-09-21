@@ -1,0 +1,208 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Protected Course Player</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root{
+        --tile-w: 420px; --tile-h: 220px;
+        --opacity: .22; --drift-x: -240px; --drift-y: -140px; --drift-dur: 36s;
+      }
+      body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px}
+      .stage{position:relative;max-width:960px;margin:0 auto;background:#000}
+      video{width:100%;display:block;background:#000}
+      video[controls]::-webkit-media-controls-fullscreen-button{display:none}
+      video{controlsList:nofullscreen}
+      #wmTile{position:absolute;inset:0;pointer-events:none;opacity:var(--opacity);
+        background-size:var(--tile-w) var(--tile-h);background-repeat:repeat;
+        animation:tile-drift var(--drift-dur) linear infinite alternate;will-change:background-position;}
+      @keyframes tile-drift{0%{background-position:0 0}100%{background-position:var(--drift-x) var(--drift-y)}}
+      #wmCorner{position:absolute;right:12px;bottom:12px;pointer-events:none;color:#fff;opacity:.55;
+        text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000;font-size:14px;
+        animation:hop 4s steps(1,end) infinite}
+      @keyframes hop{0%{right:12px;bottom:12px;transform:rotate(-2deg)}25%{right:auto;left:12px;bottom:12px;transform:rotate(2deg)}
+        50%{left:12px;bottom:auto;top:12px;transform:rotate(-1deg)}75%{left:auto;right:12px;top:12px;transform:rotate(1deg)}
+        100%{right:12px;bottom:12px;transform:rotate(-2deg)}}
+      .stage:fullscreen #wmTile,.stage:-webkit-full-screen #wmTile,
+      .stage:fullscreen #wmCorner,.stage:-webkit-full-screen #wmCorner{position:fixed;inset:0}
+      .controls{display:flex;gap:8px;margin:12px auto;max-width:960px}
+      .controls button{padding:8px 12px;font-size:14px}
+      #log{white-space:pre-wrap;background:#111;color:#0f0;padding:10px;border-radius:8px;max-width:960px;margin:12px auto}
+    </style>
+  </head>
+  <body>
+    <h2>Protected Course Player</h2>
+    <div class="stage" id="stage">
+      <video id="v" controls playsinline></video>
+      <div id="wmTile" aria-hidden="true"></div>
+      <div id="wmCorner" aria-hidden="true"></div>
+    </div>
+    <div class="controls">
+      <button id="btnPlay">Get URL & Play</button>
+      <button id="btnFs">Fullscreen</button>
+    </div>
+    <div id="log"></div>
+
+    <script type="module">
+      const logEl = document.getElementById('log');
+      const log = (...a)=>{ console.log(...a); logEl.textContent += a.join(' ') + '\n'; };
+
+      const stage = document.getElementById('stage');
+      const video = document.getElementById('v');
+      const tileEl = document.getElementById('wmTile');
+      const cornerEl = document.getElementById('wmCorner');
+
+      const videoId = "59cbb570-720f-43d5-880c-df38a1153f21"; // <-- set this once
+      let sessionId = null;
+      let renewTimer = null;
+      let heartbeatTimer = null;
+      let angle = -28;
+
+      async function getDeviceId(){
+        const KEY="device_id_v1";
+        let id = localStorage.getItem(KEY);
+        if (!id) {
+          const guid = crypto.getRandomValues(new Uint8Array(16));
+          const base = [
+            Array.from(guid).map(b=>b.toString(16).padStart(2,"0")).join(""),
+            navigator.userAgent, navigator.language,
+            screen.width+"x"+screen.height,
+            Intl.DateTimeFormat().resolvedOptions().timeZone || ""
+          ].join("|");
+          const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(base));
+          id = Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,"0")).join("");
+          localStorage.setItem(KEY, id);
+        }
+        return id;
+      }
+
+      // Watermark
+      function makeTile(text){
+        const w=420,h=220,dpr=Math.max(1,Math.min(2,devicePixelRatio||1));
+        const c=document.createElement('canvas'); c.width=w*dpr; c.height=h*dpr;
+        const x=c.getContext('2d'); x.scale(dpr,dpr);
+        x.translate(w/2,h/2); x.rotate(angle*Math.PI/180);
+        x.font='600 18px system-ui,sans-serif'; x.textAlign='center'; x.textBaseline='middle';
+        x.lineWidth=2; x.strokeStyle='rgba(0,0,0,.75)'; x.strokeText(text,0,0);
+        x.fillStyle='rgba(255,255,255,.75)'; x.fillText(text,0,0);
+        return c.toDataURL('image/png');
+      }
+      function applyTile(text){
+        tileEl.style.backgroundImage = `url(${makeTile(text)})`;
+        cornerEl.textContent = text;
+      }
+      function randomizeStart(){
+        tileEl.style.backgroundPosition =
+          `-${Math.floor(Math.random()*420)}px -${Math.floor(Math.random()*220)}px`;
+      }
+
+      async function requestPlayURL(existingSessionId=null, opts={}) {
+        const deviceId = await getDeviceId();
+        const body = {
+          userId:'u1',                          // <-- set actual user id
+          email:'student@example.com',          // <-- set actual user email
+          videoId,
+          deviceId,
+          sessionId: existingSessionId || undefined,
+          ttlSeconds: 0,                        // 0 => let server use TOKEN_TTL_SECONDS
+          ...opts                               // e.g. { endPrevious:true }
+        };
+        const r = await fetch('http://localhost:3000/hls-play', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body)
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || ('HTTP '+r.status));
+        return data; // { url, expires, watermark, sessionId, hbSec }
+      }
+
+      async function loadUrl(url) {
+        if (video.canPlayType('application/vnd.apple.mpegURL')) {
+          const t = video.currentTime || 0;
+          video.src = url; video.load(); video.currentTime = t;
+          await video.play().catch(()=>{});
+        } else {
+          const Hls = (await import('https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.mjs')).default;
+          const hls = new Hls();
+          hls.on(Hls.Events.ERROR, (_e,d)=> log('[hls ERROR]', d.type, d.details, d.fatal?'FATAL':''));
+          hls.loadSource(url);
+          hls.attachMedia(video);
+          await video.play().catch(()=>{});
+        }
+      }
+
+      function startHeartbeat(periodSec){
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = setInterval(async () => {
+          if (!sessionId) return;
+          try {
+            await fetch('http://localhost:3000/heartbeat', {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({ sessionId })
+            });
+          } catch {}
+        }, (periodSec || 60) * 1000);
+      }
+
+      async function startPlayback() {
+        try {
+          let data;
+          try {
+            data = await requestPlayURL(sessionId);
+          } catch (e) {
+            // handle controlled takeover
+            if (String(e.message).includes("Another session is active")) {
+              if (confirm("You're watching on another device. End that session and continue here?")) {
+                data = await requestPlayURL(sessionId, { endPrevious:true });
+              } else {
+                throw e;
+              }
+            } else {
+              throw e;
+            }
+          }
+
+          sessionId = data.sessionId;
+
+          // Watermark (server already includes device/session short IDs)
+          const base = (data.watermark || 'user@example.com');
+          const render = () => applyTile(`${base.split(' • ')[0]} • ${sessionId.slice(0,8)} • ${new Date().toISOString()}`);
+          render(); randomizeStart();
+          setInterval(render, 10000);
+          setInterval(()=>{ angle = -28 + (Math.random()*6 - 3); render(); }, 60000);
+
+          await loadUrl(data.url);
+
+          // Silent renewal ~2 min before expiry
+          clearTimeout(renewTimer);
+          const msUntilRenew = Math.max(10000, (data.expires*1000 - Date.now()) - 120000);
+          renewTimer = setTimeout(startPlayback, msUntilRenew);
+
+          // Heartbeats
+          startHeartbeat(data.hbSec);
+        } catch (e) {
+          log('[start] failed:', e.message || e);
+          alert(e.message || 'Playback error');
+        }
+      }
+
+      document.getElementById('btnPlay').addEventListener('click', startPlayback);
+      document.getElementById('btnFs').addEventListener('click', async () => {
+        const stage = document.getElementById('stage');
+        if (!document.fullscreenElement) await stage.requestFullscreen().catch(()=>{});
+        else await document.exitFullscreen().catch(()=>{});
+      });
+
+      // End session on unload (best effort)
+      window.addEventListener('beforeunload', async () => {
+        try {
+          if (sessionId) navigator.sendBeacon('http://localhost:3000/end-session', JSON.stringify({ sessionId }));
+        } catch {}
+      });
+    </script>
+  </body>
+</html>
+
